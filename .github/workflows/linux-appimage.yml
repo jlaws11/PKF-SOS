@@ -38,4 +38,4 @@ jobs:
           tag_name: linux-build-${{ github.run_number }}
           name: Linux build ${{ github.run_number }}
           prerelease: true
-          files: PKForge-x86_64.AppImage
+          files: PKF-SOS-x86_64.AppImage
