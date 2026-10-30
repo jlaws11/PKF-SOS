@@ -37,5 +37,5 @@ jobs:
         with:
           tag_name: linux-build-${{ github.run_number }}
           name: Linux build ${{ github.run_number }}
-          prerelease: true
+          prerelease: false
           files: PKF-SOS-x86_64.AppImage
