@@ -1,88 +1,92 @@
-name: build
+name: Build PKF-SOS
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
+    paths:
+      - 'pkf-sos-port.zip'
+
+permissions:
+  contents: write
 
 jobs:
-  test-and-build:
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
+  linux:
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Add the port files
+        run: |
+          test -f pkf-sos-port.zip || { echo "pkf-sos-port.zip is missing"; exit 1; }
+          unzip -o pkf-sos-port.zip -d .
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-      - name: Install MAUI Android workload
-        run: dotnet workload install maui-android
-      - name: Restore
-        run: dotnet restore PKForge.sln
-      - name: Test
-        run: |
-          dotnet test tests/PKForge.Domain.Tests/PKForge.Domain.Tests.csproj --no-restore --configuration Release
-          dotnet test tests/PKForge.Engine.Tests/PKForge.Engine.Tests.csproj --no-restore --configuration Release
-      - name: Decode permanent release signing key
-        if: github.ref_type == 'tag'
-        env:
-          PKFORGE_ANDROID_KEYSTORE_BASE64: ${{ secrets.PKFORGE_ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          if [[ -z "$PKFORGE_ANDROID_KEYSTORE_BASE64" ]]; then
-            echo "Permanent release signing secret is missing."
-            exit 1
-          fi
-          printf '%s' "$PKFORGE_ANDROID_KEYSTORE_BASE64" | base64 --decode > "${RUNNER_TEMP}/pkforge-release.p12"
-      - name: Build Android APK
-        shell: bash
-        env:
-          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/pkforge-release.p12
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.PKFORGE_ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.PKFORGE_ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.PKFORGE_ANDROID_KEY_PASSWORD }}
-        run: |
-          configuration="Debug"
-          signing_args=(-p:AndroidKeyStore=false)
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            configuration="Release"
-            signing_args=(
-              -p:AndroidKeyStore=true
-              -p:AndroidSigningKeyStore="$ANDROID_KEYSTORE_PATH"
-              -p:AndroidSigningStorePass="$ANDROID_KEYSTORE_PASSWORD"
-              -p:AndroidSigningKeyAlias="$ANDROID_KEY_ALIAS"
-              -p:AndroidSigningKeyPass="$ANDROID_KEY_PASSWORD"
-            )
-          fi
-          dotnet build src/PKForge.App/PKForge.App.csproj --no-restore \
-            --configuration "$configuration" -f net10.0-android "${signing_args[@]}"
-      - name: Locate APK
-        id: apk
-        run: |
-          apk=$(find src/PKForge.App/bin -name '*-Signed.apk' | head -1)
-          echo "path=$apk" >> "$GITHUB_OUTPUT"
-          echo "name=PKForge-${GITHUB_REF_NAME}.apk" >> "$GITHUB_OUTPUT"
-      - name: Verify permanent release signature
-        if: github.ref_type == 'tag'
-        run: |
-          expected="E2:6F:3F:FF:8A:89:00:D8:5E:D8:EF:72:E1:CA:7F:50:33:D2:A5:57:98:0B:26:19:F1:1D:6D:E2:10:09:BF:D8"
-          actual=$(keytool -printcert -jarfile "${{ steps.apk.outputs.path }}" | tr -d '\r' | grep -m1 'SHA256:')
-          echo "$actual"
-          echo "$actual" | grep -Fq "$expected"
+
+      - name: Publish for Linux
+        run: dotnet publish src/PKForge.Linux/PKForge.Linux.csproj -c Release -r linux-x64 --self-contained true -o publish
+
+      - name: Build the AppImage
+        run: bash packaging/build-appimage.sh
+
       - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
         with:
-          name: pkforge-apk
-          path: ${{ steps.apk.outputs.path }}
-          retention-days: 3
-      - name: Stage release asset
-        if: github.ref_type == 'tag'
-        run: cp "${{ steps.apk.outputs.path }}" "PKForge-${GITHUB_REF_NAME}.apk"
-      - name: Release
-        if: github.ref_type == 'tag'
+          name: linux-appimage
+          path: PKF-SOS-x86_64.AppImage
+
+  windows:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Add the port files
+        run: |
+          test -f pkf-sos-port.zip || { echo "pkf-sos-port.zip is missing"; exit 1; }
+          unzip -o pkf-sos-port.zip -d .
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish for Windows
+        run: dotnet publish src/PKForge.Linux/PKForge.Linux.csproj -c Release -r win-x64 --self-contained true -o publish-win
+
+      - name: Make the zip
+        run: |
+          mkdir PKF-SOS
+          cp -r publish-win/. PKF-SOS/
+          mv PKF-SOS/PKForge.exe PKF-SOS/PKF-SOS.exe
+          printf 'PKF-SOS for Windows\r\n\r\n1. Unzip this whole folder anywhere.\r\n2. Double-click PKF-SOS.exe.\r\n3. Open Settings, then Folders, and add the folder that holds your saves.\r\n\r\nClose your emulator before editing a save. Windows may warn that the app is unrecognised because it is not signed: choose More info, then Run anyway.\r\nUnofficial and AI built. Not affiliated with PKForge. Keep backups of your saves.\r\n' > PKF-SOS/README.txt
+          zip -qr PKF-SOS-windows-x64.zip PKF-SOS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: PKF-SOS-windows-x64.zip
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+
+      - name: Show what is being published
+        run: ls -l downloads
+
+      - name: Publish one release with both downloads
         uses: softprops/action-gh-release@v2
         with:
-          files: PKForge-${{ github.ref_name }}.apk
-          generate_release_notes: true
+          tag_name: build-${{ github.run_number }}
+          name: PKF-SOS build ${{ github.run_number }}
+          prerelease: false
+          files: |
+            downloads/PKF-SOS-x86_64.AppImage
+            downloads/PKF-SOS-windows-x64.zip
